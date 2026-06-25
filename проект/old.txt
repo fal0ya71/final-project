@@ -1,0 +1,166 @@
+import urllib.parse
+from bs4 import BeautifulSoup
+import telebot
+
+try:
+    from curl_cffi import requests
+    USE_CURL_CFFI = True
+except ImportError:
+    import requests
+    USE_CURL_CFFI = False
+
+TOKEN = "8060653639:AAGk2C8nOzin9NizT2-FfcltllUS72Uh-Cc"
+bot = telebot.TeleBot(TOKEN)
+
+def fetch(url, timeout=15):
+    """Делает GET-запрос, маскируясь под браузер, если возможно."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    if USE_CURL_CFFI:
+        return requests.get(url, impersonate="chrome", timeout=timeout)
+    else:
+        return requests.get(url, headers=headers, timeout=timeout)
+
+def parse_symptoms(symptoms_text):
+    encoded = urllib.parse.quote(symptoms_text)
+    url = f"https://www.takzdorovo.ru/search/?q={encoded}&where=articles"
+    try:
+        resp = fetch(url)
+        if resp.status_code != 200:
+            return f"Сайт недоступен (код {resp.status_code}).\nПерейдите по ссылке: {url}"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # Гибкие селекторы (частичное совпадение)
+        items = soup.select("[class*='search-result'] [class*='item'], [class*='search-page'] [class*='title'], a[href*='/articles/']")
+        if not items:
+            return f"Парсер не нашёл статей.\nПроверьте вручную: {url}"
+        diseases = []
+        for item in items[:5]:
+            txt = item.get_text(strip=True)
+            if txt and len(txt) > 5:  # отсекаем пустые и слишком короткие
+                diseases.append(txt)
+        if not diseases:
+            return f"Названия не извлечены.\nВоспользуйтесь ссылкой: {url}"
+        return "Возможные заболевания (по TakZdorovo):\n• " + "\n• ".join(diseases)
+    except Exception as e:
+        return f"Ошибка соединения: {e}\nСсылка: {url}"
+
+def parse_drugs(disease_name):
+    encoded = urllib.parse.quote(disease_name)
+    url = f"https://www.rlsnet.ru/search/?q={encoded}&type=nosology"
+    try:
+        resp = fetch(url)
+        if resp.status_code != 200:
+            return f"Сайт rlsnet.ru недоступен (код {resp.status_code}).\nПоищите вручную: {url}"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # Гибкие селекторы
+        items = soup.select("[class*='search-result'] a, a[href*='/nosology/']")
+        if not items:
+            return f"Лекарства для '{disease_name}' не найдены.\nСсылка на поиск: {url}"
+        drugs = [link.get_text(strip=True) for link in items[:5] if link.get_text(strip=True)]
+        if not drugs:
+            return f"Не удалось считать список.\nПерейдите по ссылке: {url}"
+        return "Рекомендованные препараты (по РЛС):\n• " + "\n• ".join(drugs)
+    except Exception as e:
+        return f"Ошибка связи с rlsnet.ru: {e}\nСсылка: {url}"
+
+def get_medicine_info(name):
+    encoded = urllib.parse.quote(name)
+    url = f"https://www.apteka.ru/search/?q={encoded}"
+    try:
+        resp = fetch(url)
+        if resp.status_code != 200:
+            return "сайт недоступен", url
+        soup = BeautifulSoup(resp.text, "html.parser")
+        card = soup.find("div", class_="catalog-card") or soup.find("div", class_="product-card") or soup.select_one("[class*='product']")
+        if not card:
+            return "не найдено", url
+        avail_elem = card.find(string=["В наличии", "Нет в наличии"])
+        availability = avail_elem.strip() if avail_elem else "не определено"
+        price_elem = card.find("span", class_="price") or card.find(class_="product-price") or card.select_one("[class*='price']")
+        price = price_elem.get_text(strip=True) if price_elem else "цена не указана"
+        return availability, price
+    except:
+        return "ошибка сети", url
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    text = (
+        "Бот создан для ознакомления и не заменяет врача!\n\n"
+        "Команды:\n"
+        "/symptoms <симптомы> — возможные болезни\n"
+        "/drugs <болезнь> — рекомендуемые лекарства\n"
+        "/check <лекарство> — наличие и цена в аптеке"
+    )
+    bot.reply_to(message, text)
+
+# /symptoms
+@bot.message_handler(commands=['symptoms'])
+def symptoms_cmd(message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        msg = bot.reply_to(message, "Введите ваши симптомы следующим сообщением:")
+        bot.register_next_step_handler(msg, symptoms_step)
+        return
+    execute_symptoms(message, parts[1])
+
+def symptoms_step(message):
+    if message.text.startswith('/'):
+        bot.reply_to(message, "Поиск отменён.")
+        return
+    execute_symptoms(message, message.text)
+
+def execute_symptoms(message, text):
+    bot.reply_to(message, f"Ищу '{text}' по базе takzdorovo.ru...")
+    reply = parse_symptoms(text)
+    bot.reply_to(message, reply)
+
+@bot.message_handler(commands=['drugs'])
+def drugs_cmd(message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        msg = bot.reply_to(message, "Введите название болезни следующим сообщением:")
+        bot.register_next_step_handler(msg, drugs_step)
+        return
+    execute_drugs(message, parts[1])
+
+def drugs_step(message):
+    if message.text.startswith('/'):
+        bot.reply_to(message, "Поиск отменён.")
+        return
+    execute_drugs(message, message.text)
+
+def execute_drugs(message, text):
+    bot.reply_to(message, f"Ищу лекарства для '{text}' на rlsnet.ru...")
+    reply = parse_drugs(text)
+    bot.reply_to(message, reply)
+
+@bot.message_handler(commands=['check'])
+def check_med(message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        msg = bot.reply_to(message, "Введите название лекарства следующим сообщением:")
+        bot.register_next_step_handler(msg, check_step)
+        return
+    execute_check(message, parts[1])
+
+def check_step(message):
+    if message.text.startswith('/'):
+        bot.reply_to(message, "Поиск отменён.")
+        return
+    execute_check(message, message.text)
+
+def execute_check(message, text):
+    bot.reply_to(message, f"Проверяю '{text}' на apteka.ru...")
+    avail, price = get_medicine_info(text)
+    bot.reply_to(message, f"Препарат: {text}\nНаличие: {avail}\nЦена/Ссылка: {price}")
+
+@bot.message_handler(func=lambda message: True)
+def unknown_message(message):
+    if message.text.startswith('/'):
+        bot.reply_to(message, "Неизвестная команда. Введите /start для списка доступных команд.")
+    else:
+        bot.reply_to(message, "Используйте команды:\n/symptoms кашель\n/drugs ангина\n/check парацетамол")
+
+bot.infinity_polling()
