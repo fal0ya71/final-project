@@ -1,7 +1,7 @@
 import telebot
 from parsers import parse_symptoms, parse_drugs
 
-TOKEN = "8060653639:AAGk2C8nOzin9NizT2-FfcltllUS72Uh-Cc"
+TOKEN = "твой токен"
 bot = telebot.TeleBot(TOKEN)
 
 @bot.message_handler(commands=['start'])
