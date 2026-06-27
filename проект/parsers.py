@@ -36,7 +36,7 @@ def parse_symptoms(symptoms_text):
             text = item.get_text(strip=True)
             if text and len(text) > 3:
                 diseases.append(text)
-        unique = list(dict.fromkeys(diseases))[:3]
+        unique = list(dict.fromkeys(diseases))[:5]   # было 3, стало 5
         if unique:
             return "Возможные заболевания:\n• " + "\n• ".join(unique)
         return "По вашему запросу ничего не найдено."
